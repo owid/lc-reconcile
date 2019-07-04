@@ -1,67 +1,65 @@
 """
-An OpenRefine reconciliation service for the id.loc.gov LCNAF/LCSH suggest API.
+An OpenRefine reconciliation service
 """
-from flask import Flask, request, jsonify
-from fuzzywuzzy import fuzz
+from flask import Flask, request, jsonify, g
 import getopt
 import json
-from operator import itemgetter
-import rdflib
-from rdflib.namespace import SKOS
-import requests
-from sys import version_info
-import urllib
-import xml.etree.ElementTree as ET
-# Help text processing
-import text
+import collections
+import fingerprints
+import difflib
+
+from flask_mysqldb import MySQL
+import MySQLdb
+
+LOAD_COUNTRIES_SQL = """
+SELECT cn.*, cd.*
+FROM country_name_tool_countryname cn
+INNER JOIN country_name_tool_countrydata cd ON cd.id = cn.owid_country
+"""
 
 app = Flask(__name__)
+app.config.from_envvar('OWID_RECONCILIATION_SETTINGS')
+mysql = MySQL(app)
 
-# See if Python 3 for unicode/str use decisions
-PY3 = version_info > (3,)
 
-# If it's installed, use the requests_cache library to
-# cache calls to the FAST API.
-try:
-    import requests_cache
-    requests_cache.install_cache('lc_cache')
-except ImportError:
-    app.logger.debug("No request cache found.")
-    pass
+def get_countries():
+    if 'countries' in g:
+        return g.countries
 
-# Map the LoC query indexes to service types
-default_query = {
-    "id": "LoC",
-    "name": "LCNAF & LCSH",
-    "index": "/authorities"
-}
+    rv = collections.defaultdict(list)
 
-refine_to_lc = [
+    cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
+    cursor.execute(LOAD_COUNTRIES_SQL)
+    for r in cursor.fetchall():
+        rv[fingerprints.generate(r["country_name"])].append(r)
+
+    g.countries = rv
+    return g.countries
+
+
+QUERY_TYPES = [
     {
-        "id": "Names",
-        "name": "Library of Congress Name Authority File",
-        "index": "/authorities/names"
-    },
-    {
-        "id": "Subjects",
-        "name": "Library of Congress Subject Headings",
-        "index": "/authorities/subjects"
+        "id": "/geo/country",
+        "name": "Countries"
     }
 ]
-refine_to_lc.append(default_query)
-
-# Make a copy of the LC mappings.
-query_types = [{'id': item['id'], 'name': item['name']} for item in refine_to_lc]
 
 # Basic service metadata.
 metadata = {
-    "name": "LoC Reconciliation Service",
-    "defaultTypes": query_types,
-    "identifierSpace" : "http://localhost/identifier",
-    "schemaSpace" : "http://localhost/schema",
+    "name": "OWID Country Reconciliation Service",
+    "defaultTypes": QUERY_TYPES,
+    "identifierSpace": "http://localhost/identifier",
+    "schemaSpace": "http://localhost/schema",
     "view": {
         "url": "{{id}}"
     },
+    "suggest": {
+        "entity": {
+            "service_path": "/suggest/entity",
+            "service_url": "http://localhost:5000",
+            "flyout_service_path": "/flyout/entity?id=${id}"
+        }
+    }
 }
 
 
@@ -78,113 +76,102 @@ def jsonpify(obj):
         return jsonify(obj)
 
 
-def search(raw_query, query_type='/lc'):
-    out = []
-    query = text.normalize(raw_query, PY3).strip()
-    query_type_meta = [i for i in refine_to_lc if i['id'] == query_type]
-    if query_type_meta == []:
-        query_type_meta = default_query
-    query_index = query_type_meta[0]['index']
-    # Get the results for the primary suggest API (primary headings, no cross-refs)
-    try:
-        if PY3:
-            url = "http://id.loc.gov" + query_index + '/suggest/?q=' + urllib.parse.quote(query.encode('utf8'))
-        else:
-            url = "http://id.loc.gov" + query_index + '/suggest/?q=' + urllib.quote(query.encode('utf8'))
-        app.logger.debug("LC Authorities API url is " + url)
-        resp = requests.get(url)
-        results = resp.json()
-    except getopt.GetoptError as e:
-        app.logger.warning(e)
-        return out
-    for n in range(0, len(results[1])):
-        match = False
-        name = results[1][n]
-        uri = results[3][n]
-        score = fuzz.token_sort_ratio(query, name)
-        if score > 95:
-            match = True
-        app.logger.debug("Label is " + name + " Score is " + str(score) + " URI is " + uri)
-        resource = {
-            "id": uri,
-            "name": name,
-            "score": score,
-            "match": match,
-            "type": query_type_meta
-        }
-        out.append(resource)
-    # Get the results for the didyoumean API (cross-refs, no primary headings)
-    try:
-        if query_index != '/authorities':
-            if PY3:
-                url = "http://id.loc.gov" + query_index + '/didyoumean/?label=' + urllib.parse.quote(query.encode('utf8'))
-            else:
-                url = "http://id.loc.gov" + query_index + '/didyoumean/?label=' + urllib.quote(query.encode('utf8'))
-            app.logger.debug("LC Authorities API url is " + url)
-            altresp = requests.get(url)
-            altresults = ET.fromstring(altresp.content)
-            altresults2 = None
-        else:
-            if PY3:
-                url = 'http://id.loc.gov/authorities/names/didyoumean/?label=' + urllib.parse.quote(query.encode('utf8'))
-                url2 = 'http://id.loc.gov/authorities/subjects/didyoumean/?label=' + urllib.parse.quote(query.encode('utf8'))
-            else:
-                url = 'http://id.loc.gov/authorities/names/didyoumean/?label=' + urllib.quote(query.encode('utf8'))
-                url2 = 'http://id.loc.gov/authorities/subjects/didyoumean/?label=' + urllib.quote(query.encode('utf8'))
-            app.logger.debug("LC Authorities API url is " + url)
-            app.logger.debug("LC Authorities API url is " + url2)
-            altresp = requests.get(url)
-            altresp2 = requests.get(url2)
-            altresults = ET.fromstring(altresp.content)
-            altresults2 = ET.fromstring(altresp2.content)
-    except getopt.GetoptError as e:
-        app.logger.warning(e)
-        return out
-    for child in altresults.iter('{http://id.loc.gov/ns/id_service#}term'):
-        match = False
-        name = child.text
-        uri = child.get('uri')
-        score = fuzz.token_sort_ratio(query, name)
-        if score > 95:
-            match = True
-        app.logger.debug("Label is " + name + " Score is " + str(score) + " URI is " + uri)
-        resource = {
-            "id": uri,
-            "name": name,
-            "score": score,
-            "match": match,
-            "type": query_type_meta
-        }
-        out.append(resource)
-    if altresults2 is not None:
-        for child in altresults2.iter('{http://id.loc.gov/ns/id_service#}term'):
-            match = False
-            name = child.text
-            uri = child.get('uri')
-            score = fuzz.token_sort_ratio(query, name)
-            if score > 95:
-                match = True
-            app.logger.debug("Label is " + name + " Score is " + str(score) + " URI is " + uri)
-            resource = {
-                "id": uri,
-                "name": name,
-                "score": score,
-                "match": match,
-                "type": query_type_meta
+def search(raw_query, query_type='/geo/country'):
+    raw_query = fingerprints.generate(raw_query)
+    countries = get_countries()
+
+    rv = []
+
+    matches = countries[fingerprints.generate(raw_query)]
+    for m in sorted(matches,
+                    key=lambda i: difflib.SequenceMatcher(
+                        None, raw_query, fingerprints.generate(
+                            i['country_name'])).quick_ratio(),
+                    reverse=True):
+        score = difflib.SequenceMatcher(
+            None, raw_query, fingerprints.generate(
+                m['country_name'])).quick_ratio()
+        rv.append({
+            'id': str(m['cd.id']),
+            'name': m['owid_name'],
+            'type': [QUERY_TYPES[0]['id']],
+            'score': score * 100,
+            'match': score == 1.0,
+            'all_labels': {
+                'score': score * 100,
+                'weighted': score * 100
             }
-            out.append(resource)
-    # Sort this list containing preflabels and crossrefs by score
-    sorted_out = sorted(out, key=itemgetter('score'), reverse=True)
-    # Refine only will handle top three matches.
-    return sorted_out[:3]
+        })
+
+        rv.append({
+            'id': str(4242),
+            'name': "PETE",
+            'type': [QUERY_TYPES[0]['id']],
+            'score': difflib.SequenceMatcher(
+                None, raw_query, fingerprints.generate(
+                    'PETE')).quick_ratio(),
+            'match': False,
+        })
+
+    return rv
 
 
-@app.route("/", methods=['POST', 'GET'])
+@app.route("/suggest/entity", methods=["GET"])
+def suggest_entity():
+    prefix = request.args.get('prefix')
+    resp = {
+        "code": "/api/status/ok",
+        "status": "200 OK",
+        "prefix": prefix,
+    }
+
+    cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
+    cursor.execute(r"""
+    SELECT DISTINCT cd.id AS id, cd.owid_name AS name FROM country_name_tool_countrydata cd
+    INNER JOIN country_name_tool_countryname cn ON cn.owid_country = cd.id
+    WHERE cn.`country_name` like %s
+    """, ('%%%s%%' % prefix.lower(),))
+
+    results = []
+    for result in cursor.fetchall():
+        results.append({
+            "id": str(result['id']),
+            "name": result['name']
+        })
+
+    resp['result'] = results
+
+    return jsonpify(resp)
+
+
+@app.route("/flyout/entity", methods=["GET"])
+def flyout():
+    _id = request.args.get('id')
+    cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
+    cursor.execute("""
+    SELECT * FROM country_name_tool_countrydata
+    WHERE id = %d
+    """, (int(_id),))
+    results = cursor.fetchall()
+
+    return jsonpify(
+        {
+            "id": str(results[0]['id']),
+            "html": "<p style=\"font-size: 0.8em; color: black;\">%s</p>" % results[0]['name']
+        }
+    )
+
+
+@app.route("/reconcile", methods=['POST', 'GET'])
 def reconcile():
     # If a 'queries' parameter is supplied then it is a dictionary
     # of (key, query) pairs representing a batch of queries. We
     # should return a dictionary of (key, results) pairs.
-    queries = request.form.get('queries')
+    if request.method == 'POST':
+        queries = request.form.get('queries')
+    else:
+        queries = request.args.get('queries')
+
     if queries:
         queries = json.loads(queries)
         results = {}
@@ -207,4 +194,5 @@ if __name__ == '__main__':
     oparser.add_option('-d', '--debug', action='store_true', default=False)
     opts, args = oparser.parse_args()
     app.debug = opts.debug
+
     app.run(host='0.0.0.0')
