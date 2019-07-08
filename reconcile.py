@@ -17,6 +17,17 @@ FROM country_name_tool_countryname cn
 INNER JOIN country_name_tool_countrydata cd ON cd.id = cn.owid_country
 """
 
+SUGGEST_SQL = """
+    SELECT DISTINCT cd.id AS id, cd.owid_name AS name FROM country_name_tool_countrydata cd
+    INNER JOIN country_name_tool_countryname cn ON cn.owid_country = cd.id
+    WHERE cn.`country_name` like %s
+"""
+
+FLYOUT_SQL = """
+    SELECT * FROM country_name_tool_countrydata
+    WHERE id = %s
+"""
+
 app = Flask(__name__)
 app.config.from_envvar('OWID_RECONCILIATION_SETTINGS')
 mysql = MySQL(app)
@@ -57,7 +68,7 @@ metadata = {
         "entity": {
             "service_path": "/suggest/entity",
             "service_url": "http://localhost:5000",
-            "flyout_service_path": "/flyout/entity?id=${id}"
+            # "flyout_service_path": "/flyout/entity?id=${id}"
         }
     }
 }
@@ -103,16 +114,6 @@ def search(raw_query, query_type='/geo/country'):
             }
         })
 
-        rv.append({
-            'id': str(4242),
-            'name': "PETE",
-            'type': [QUERY_TYPES[0]['id']],
-            'score': difflib.SequenceMatcher(
-                None, raw_query, fingerprints.generate(
-                    'PETE')).quick_ratio(),
-            'match': False,
-        })
-
     return rv
 
 
@@ -126,11 +127,7 @@ def suggest_entity():
     }
 
     cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
-    cursor.execute(r"""
-    SELECT DISTINCT cd.id AS id, cd.owid_name AS name FROM country_name_tool_countrydata cd
-    INNER JOIN country_name_tool_countryname cn ON cn.owid_country = cd.id
-    WHERE cn.`country_name` like %s
-    """, ('%%%s%%' % prefix.lower(),))
+    cursor.execute(SUGGEST_SQL, ('%%%s%%' % prefix.lower(),))
 
     results = []
     for result in cursor.fetchall():
@@ -148,16 +145,13 @@ def suggest_entity():
 def flyout():
     _id = request.args.get('id')
     cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
-    cursor.execute("""
-    SELECT * FROM country_name_tool_countrydata
-    WHERE id = %d
-    """, (int(_id),))
+    cursor.execute(FLYOUT_SQL, (_id,))
     results = cursor.fetchall()
 
     return jsonpify(
         {
             "id": str(results[0]['id']),
-            "html": "<p style=\"font-size: 0.8em; color: black;\">%s</p>" % results[0]['name']
+            "html": "<p style=\"font-size: 0.8em; color: black;\">%s</p>" % results[0]['owid_name']
         }
     )
 
