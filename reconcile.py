@@ -12,15 +12,25 @@ from flask_mysqldb import MySQL
 import MySQLdb
 
 LOAD_COUNTRIES_SQL = """
-SELECT cn.*, cd.*
+SELECT cd.id AS id, cn.country_name AS name_to_match, cd.owid_name AS canonical_name, "country" AS type
 FROM country_name_tool_countryname cn
 INNER JOIN country_name_tool_countrydata cd ON cd.id = cn.owid_country
+
+UNION
+
+SELECT e.id AS id, e.name AS name_to_match, e.name AS canonical_name, "entity" AS type
+FROM entities e
 """
 
 SUGGEST_SQL = """
     SELECT DISTINCT cd.id AS id, cd.owid_name AS name FROM country_name_tool_countrydata cd
     INNER JOIN country_name_tool_countryname cn ON cn.owid_country = cd.id
-    WHERE cn.`country_name` like %s
+    WHERE LOWER(cn.`country_name`) like %s
+
+    UNION
+
+    SELECT DISTINCT e.id AS id, e.name as name FROM entities e
+    WHERE LOWER(e.`name`) like %s
 """
 
 FLYOUT_SQL = """
@@ -42,7 +52,7 @@ def get_countries():
     cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
     cursor.execute(LOAD_COUNTRIES_SQL)
     for r in cursor.fetchall():
-        rv[fingerprints.generate(r["country_name"])].append(r)
+        rv[fingerprints.generate(r["name_to_match"])].append(r)
 
     g.countries = rv
     return g.countries
@@ -94,20 +104,21 @@ def search(raw_query, query_type='/geo/country'):
     rv = []
 
     matches = countries[fingerprints.generate(raw_query)]
+    for m in matches:
+        m['comparison_score'] = difflib.SequenceMatcher(
+            None, raw_query, fingerprints.generate(m['name_to_match'])) \
+            .quick_ratio()
+
     for m in sorted(matches,
-                    key=lambda i: difflib.SequenceMatcher(
-                        None, raw_query, fingerprints.generate(
-                            i['country_name'])).quick_ratio(),
+                    key=lambda i: i['comparison_score'],
                     reverse=True):
-        score = difflib.SequenceMatcher(
-            None, raw_query, fingerprints.generate(
-                m['country_name'])).quick_ratio()
+        score = m['comparison_score']
         rv.append({
-            'id': str(m['cd.id']),
-            'name': m['owid_name'],
+            'id': str(m['id']),
+            'name': m['canonical_name'],
             'type': [QUERY_TYPES[0]['id']],
             'score': score * 100,
-            'match': score == 1.0,
+            'match': m['type'] == 'country' and score == 1.0,
             'all_labels': {
                 'score': score * 100,
                 'weighted': score * 100
@@ -127,7 +138,7 @@ def suggest_entity():
     }
 
     cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
-    cursor.execute(SUGGEST_SQL, ('%%%s%%' % prefix.lower(),))
+    cursor.execute(SUGGEST_SQL, ('%%%s%%' % prefix.lower(),) * 2)
 
     results = []
     for result in cursor.fetchall():
