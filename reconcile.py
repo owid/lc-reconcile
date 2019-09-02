@@ -12,19 +12,21 @@ from flask_mysqldb import MySQL
 import MySQLdb
 
 LOAD_COUNTRIES_SQL = """
-SELECT cd.id AS id, cn.country_name AS name_to_match, cd.owid_name AS canonical_name, "country" AS type
+SELECT e.id AS id, cn.country_name AS name_to_match, cd.owid_name AS canonical_name
 FROM country_name_tool_countryname cn
 INNER JOIN country_name_tool_countrydata cd ON cd.id = cn.owid_country
+INNER JOIN entities e ON e.name = cd.owid_name
 
 UNION
 
-SELECT e.id AS id, e.name AS name_to_match, e.name AS canonical_name, "entity" AS type
+SELECT e.id AS id, e.name AS name_to_match, e.name AS canonical_name
 FROM entities e
 """
 
 SUGGEST_SQL = """
     SELECT DISTINCT cd.id AS id, cd.owid_name AS name FROM country_name_tool_countrydata cd
     INNER JOIN country_name_tool_countryname cn ON cn.owid_country = cd.id
+    INNER JOIN entities e ON e.name = cd.owid_name
     WHERE LOWER(cn.`country_name`) like %s
 
     UNION
@@ -34,8 +36,9 @@ SUGGEST_SQL = """
 """
 
 FLYOUT_SQL = """
-    SELECT * FROM country_name_tool_countrydata
-    WHERE id = %s
+    SELECT e.id AS id, e.name AS owid_name FROM country_name_tool_countrydata cd
+    INNER JOIN entities e ON e.name = cd.owid_name
+    WHERE e.id = %s
 """
 
 app = Flask(__name__)
@@ -118,7 +121,7 @@ def search(raw_query, query_type='/geo/country'):
             'name': m['canonical_name'],
             'type': [QUERY_TYPES[0]['id']],
             'score': score * 100,
-            'match': m['type'] == 'country' and score == 1.0,
+            'match': score == 1.0,
             'all_labels': {
                 'score': score * 100,
                 'weighted': score * 100
