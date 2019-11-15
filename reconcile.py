@@ -12,19 +12,19 @@ from flask_mysqldb import MySQL
 import MySQLdb
 
 LOAD_COUNTRIES_SQL = """
-SELECT e.id AS id, cn.country_name AS name_to_match, cd.owid_name AS canonical_name
-FROM country_name_tool_countryname cn
-INNER JOIN country_name_tool_countrydata cd ON cd.id = cn.owid_country
-INNER JOIN entities e ON e.name = cd.owid_name
+    SELECT e.id AS id, cn.country_name AS name_to_match, cd.owid_name AS canonical_name
+    FROM country_name_tool_countryname cn
+    INNER JOIN country_name_tool_countrydata cd ON cd.id = cn.owid_country
+    INNER JOIN entities e ON e.name = cd.owid_name
 
-UNION
+    UNION
 
-SELECT e.id AS id, e.name AS name_to_match, e.name AS canonical_name
-FROM entities e
+    SELECT e.id AS id, e.name AS name_to_match, e.name AS canonical_name
+    FROM entities e
 """
 
 SUGGEST_SQL = """
-    SELECT DISTINCT cd.id AS id, cd.owid_name AS name FROM country_name_tool_countrydata cd
+    SELECT DISTINCT e.id AS id, cd.owid_name AS name FROM country_name_tool_countrydata cd
     INNER JOIN country_name_tool_countryname cn ON cn.owid_country = cd.id
     INNER JOIN entities e ON e.name = cd.owid_name
     WHERE LOWER(cn.`country_name`) like %s
@@ -42,7 +42,7 @@ FLYOUT_SQL = """
 """
 
 app = Flask(__name__)
-app.config.from_envvar('OWID_RECONCILIATION_SETTINGS')
+app.config.from_pyfile('settings.cfg')
 mysql = MySQL(app)
 
 
